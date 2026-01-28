@@ -23,7 +23,9 @@ jobs:
           python --version
         shell: powershell
 
-      - name: Run installer
+      - name: Run installer (CI mode)
+        env:
+          CI_MODE: "1"
         run: |
           powershell -ExecutionPolicy Bypass -File installer\install.ps1
         shell: powershell
