@@ -1,7 +1,9 @@
 # installer/install.ps1
 # ComfyUI One-Click Installer (CUDA/NVIDIA edition)
 # Installs: ComfyUI + venv + requirements + PyTorch CUDA + custom nodes from nodes.list
-# Then: Launch ComfyUI -> Wait for port 8188 -> Ping -> Shutdown
+# Health Check:
+# - In CI_MODE (GitHub Actions): skips launching ComfyUI
+# - On real machine: launches ComfyUI -> waits for port 8188 -> pings -> shuts down
 
 $ErrorActionPreference = "Stop"
 
@@ -21,7 +23,7 @@ function Get-RepoNameFromUrl($url) {
     return $parts[$parts.Length - 1]
 }
 
-function Wait-ForUrl($url, $timeoutSeconds = 90) {
+function Wait-ForUrl($url, $timeoutSeconds = 120) {
     $start = Get-Date
     while (((Get-Date) - $start).TotalSeconds -lt $timeoutSeconds) {
         try {
@@ -36,6 +38,9 @@ function Wait-ForUrl($url, $timeoutSeconds = 90) {
     return $false
 }
 
+# -------------------------
+# Paths + logging
+# -------------------------
 $root = Join-Path $PSScriptRoot ".."
 $logDir = Join-Path $root "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -45,7 +50,19 @@ Start-Transcript -Path $logFile -Append
 
 Write-Step "ComfyUI One-Click Installer (CUDA/NVIDIA)"
 
-# --- Validate tools ---
+# -------------------------
+# CI mode detection
+# -------------------------
+$ciMode = $env:CI_MODE -eq "1"
+if ($ciMode) {
+    Write-Host "CI_MODE detected: YES (GitHub Actions / non-GPU test environment)"
+} else {
+    Write-Host "CI_MODE detected: NO (real machine mode)"
+}
+
+# -------------------------
+# Validate tools
+# -------------------------
 Write-Step "Checking prerequisites"
 
 if (!(Test-Command "git")) {
@@ -58,13 +75,17 @@ if (!(Test-Command "python")) {
 python --version
 git --version
 
-# --- Setup folders ---
+# -------------------------
+# Setup directories
+# -------------------------
 $comfyDir = Join-Path $root "ComfyUI"
 $venvDir  = Join-Path $comfyDir "venv"
 $nodesDir = Join-Path $comfyDir "custom_nodes"
 $nodesListPath = Join-Path $root "installer\nodes.list"
 
-# --- Install / update ComfyUI ---
+# -------------------------
+# Install/update ComfyUI
+# -------------------------
 Write-Step "Installing/Updating ComfyUI"
 
 if (!(Test-Path $comfyDir)) {
@@ -76,7 +97,9 @@ if (!(Test-Path $comfyDir)) {
     git pull
 }
 
-# --- Create venv ---
+# -------------------------
+# Create venv
+# -------------------------
 Write-Step "Creating virtual environment"
 
 Set-Location $comfyDir
@@ -88,21 +111,30 @@ if (!(Test-Path $venvDir)) {
     Write-Host "venv already exists."
 }
 
-$py = Join-Path $venvDir "Scripts\python.exe"
+$py  = Join-Path $venvDir "Scripts\python.exe"
 $pip = Join-Path $venvDir "Scripts\pip.exe"
 
+# -------------------------
+# Upgrade pip
+# -------------------------
 Write-Step "Upgrading pip"
 & $py -m pip install --upgrade pip
 
-# --- Install PyTorch CUDA ---
+# -------------------------
+# Install PyTorch CUDA build
+# -------------------------
 Write-Step "Installing PyTorch (CUDA build)"
 & $pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# --- Install ComfyUI requirements ---
+# -------------------------
+# Install ComfyUI requirements
+# -------------------------
 Write-Step "Installing ComfyUI requirements"
 & $pip install -r (Join-Path $comfyDir "requirements.txt")
 
-# --- Custom Nodes ---
+# -------------------------
+# Install custom nodes
+# -------------------------
 Write-Step "Installing custom nodes"
 New-Item -ItemType Directory -Force -Path $nodesDir | Out-Null
 
@@ -125,7 +157,7 @@ if (!(Test-Path $nodesListPath)) {
             git pull
         }
 
-        # If node contains requirements.txt, install it
+        # If node has requirements.txt, install it
         $req = Join-Path $target "requirements.txt"
         if (Test-Path $req) {
             Write-Host "Installing node requirements for $name"
@@ -134,18 +166,33 @@ if (!(Test-Path $nodesListPath)) {
     }
 }
 
-# --- Verification ---
-Write-Step "Verification (Torch + CUDA)"
+# -------------------------
+# Verification: Torch import
+# -------------------------
+Write-Step "Verification (Torch + CUDA availability)"
 & $py -c "import torch; print('torch version:', torch.__version__); print('cuda available:', torch.cuda.is_available()); print('cuda device count:', torch.cuda.device_count())"
 
-# --- Launch + Health Check ---
+# -------------------------
+# CI MODE: Skip server launch test
+# -------------------------
+if ($ciMode) {
+    Write-Step "CI_MODE enabled - skipping ComfyUI launch health check"
+    Write-Host "This is expected because GitHub Actions runners do not have NVIDIA GPUs."
+    Write-Step "DONE"
+    Stop-Transcript
+    exit 0
+}
+
+# -------------------------
+# Launch + health check (real machine mode)
+# -------------------------
 Write-Step "Launching ComfyUI and running health check"
 Set-Location $comfyDir
 
 $serverUrl = "http://127.0.0.1:8188/"
 $logServer = Join-Path $logDir "comfyui-server.log"
 
-# Start ComfyUI in background
+# Start ComfyUI process
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $py
 $psi.Arguments = "main.py --listen 127.0.0.1 --port 8188"
@@ -161,7 +208,7 @@ $p.StartInfo = $psi
 Write-Host "Starting ComfyUI..."
 [void]$p.Start()
 
-# Pipe stdout/stderr to a file
+# Stream stdout/stderr to file (background)
 Start-Job -ScriptBlock {
     param($proc, $outfile)
     while (-not $proc.HasExited) {
@@ -181,19 +228,15 @@ Write-Host "Waiting for ComfyUI at $serverUrl ..."
 $ok = Wait-ForUrl $serverUrl 120
 
 if (-not $ok) {
-    try {
-        if (-not $p.HasExited) { $p.Kill() }
-    } catch {}
+    try { if (-not $p.HasExited) { $p.Kill() } } catch {}
     throw "Health check FAILED: ComfyUI did not respond on port 8188. See logs/comfyui-server.log"
 }
 
 Write-Host "Health check PASSED: ComfyUI responded."
 
-# Shutdown
+# Stop server
 Write-Host "Stopping ComfyUI..."
-try {
-    if (-not $p.HasExited) { $p.Kill() }
-} catch {}
+try { if (-not $p.HasExited) { $p.Kill() } } catch {}
 
 Write-Step "DONE"
 Stop-Transcript
