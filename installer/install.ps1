@@ -1,6 +1,13 @@
 # installer/install.ps1
 # ComfyUI NVIDIA CUDA Installer (ComfyUI + Custom Nodes)
-# Upgraded: Auto-installs Python + Git if missing (via winget, fallback to choco)
+#
+# Flow:
+# 1) User manually installs Git and clones THIS repo
+# 2) User runs this PowerShell script
+# 3) Script installs Python (if missing) + ComfyUI + venv + CUDA Torch + nodes
+# 4) Installs InsightFace (prebuilt wheel, no C++ build tools)
+# 5) Optional: links external Models folder using extra_model_paths.yaml
+# 6) Creates run/update BAT files
 
 $ErrorActionPreference = "Stop"
 
@@ -13,87 +20,57 @@ function Test-Command($cmd) {
     return [bool](Get-Command $cmd -ErrorAction SilentlyContinue)
 }
 
-function Ensure-Admin {
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
-    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+function Refresh-Path {
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+}
 
-    if (-not $isAdmin) {
-        Write-Host ""
-        Write-Host "ERROR: Please run PowerShell as Administrator for automatic installs (Python/Git)." -ForegroundColor Red
-        Write-Host "Right click PowerShell -> Run as Administrator, then run installer again."
-        exit 1
+function Fail($msg) {
+    Write-Host ""
+    Write-Host "ERROR: $msg" -ForegroundColor Red
+    Write-Host ""
+    exit 1
+}
+
+function Ensure-Git {
+    if (!(Test-Command "git")) {
+        Fail "Git not found. Please install Git first from https://git-scm.com/downloads and restart CMD/PowerShell."
     }
+    git --version | Out-Host
 }
 
 function Ensure-WinGet {
-    if (Test-Command "winget") { return $true }
-
-    Write-Host "winget not found."
-    return $false
+    return (Test-Command "winget")
 }
 
-function Ensure-Choco {
-    if (Test-Command "choco") { return $true }
-
-    Write-Host "Chocolatey not found. Installing Chocolatey..."
-    Set-ExecutionPolicy Bypass -Scope Process -Force
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-
-    if (!(Test-Command "choco")) {
-        throw "Chocolatey installation failed."
-    }
-    return $true
-}
-
-function Install-Python {
-    Write-Step "Installing Python"
-
-    if (Ensure-WinGet) {
-        Write-Host "Installing Python via winget..."
-        winget install -e --id Python.Python.3.10 --accept-package-agreements --accept-source-agreements
-    }
-    elseif (Ensure-Choco) {
-        Write-Host "Installing Python via Chocolatey..."
-        choco install python --version=3.10.11 -y
-    }
-    else {
-        throw "No installer found (winget/choco). Cannot install Python automatically."
+function Ensure-Python {
+    if (Test-Command "python") {
+        python --version | Out-Host
+        return
     }
 
-    # Refresh PATH
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+    Write-Step "Python not found - installing Python 3.11"
+
+    if (!(Ensure-WinGet)) {
+        Fail "winget not found. Install Python manually from https://www.python.org/downloads/windows/ (Python 3.11 recommended)."
+    }
+
+    # Install Python 3.11 (recommended)
+    winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements
+    Refresh-Path
 
     if (!(Test-Command "python")) {
-        throw "Python installation completed, but python is still not available in PATH. Please restart PC and run again."
+        Fail "Python installation finished but python is still not available in PATH. Restart PC and run again."
     }
 
-    python --version
+    python --version | Out-Host
 }
 
-function Install-Git {
-    Write-Step "Installing Git"
-
-    if (Ensure-WinGet) {
-        Write-Host "Installing Git via winget..."
-        winget install -e --id Git.Git --accept-package-agreements --accept-source-agreements
-    }
-    elseif (Ensure-Choco) {
-        Write-Host "Installing Git via Chocolatey..."
-        choco install git -y
-    }
-    else {
-        throw "No installer found (winget/choco). Cannot install Git automatically."
-    }
-
-    # Refresh PATH
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-
-    if (!(Test-Command "git")) {
-        throw "Git installation completed, but git is still not available in PATH. Please restart PC and run again."
-    }
-
-    git --version
+function Ask-YesNo($prompt, $defaultYes=$true) {
+    $suffix = $defaultYes ? "[Y/n]" : "[y/N]"
+    $answer = Read-Host "$prompt $suffix"
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $defaultYes }
+    $answer = $answer.Trim().ToLower()
+    return ($answer -eq "y" -or $answer -eq "yes")
 }
 
 function Get-RepoNameFromUrl($url) {
@@ -118,6 +95,85 @@ function Wait-ForUrl($url, $timeoutSeconds = 300) {
     return $false
 }
 
+function Install-InsightFaceWheel {
+    param(
+        [string]$py,
+        [string]$pip,
+        [string]$rootDir
+    )
+
+    Write-Step "Installing InsightFace (prebuilt wheel - no C++ build tools)"
+
+    $pyver = & $py -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+    $pyver = $pyver.Trim()
+    Write-Host "Detected venv Python: $pyver"
+
+    $wheelUrl = $null
+
+    # Gourieff maintained wheels commonly used in ComfyUI ecosystem (ReActor/FaceID/etc.)
+    if ($pyver -eq "3.10") {
+        $wheelUrl = "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp310-cp310-win_amd64.whl"
+    } elseif ($pyver -eq "3.11") {
+        $wheelUrl = "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
+    } elseif ($pyver -eq "3.12") {
+        $wheelUrl = "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl"
+    } else {
+        throw "Unsupported Python version for InsightFace wheel: $pyver. Use Python 3.10/3.11/3.12."
+    }
+
+    $wheelDir = Join-Path $rootDir "installer\wheels"
+    New-Item -ItemType Directory -Force -Path $wheelDir | Out-Null
+    $wheelFile = Join-Path $wheelDir ([IO.Path]::GetFileName($wheelUrl))
+
+    Write-Host "Downloading InsightFace wheel..."
+    Invoke-WebRequest -Uri $wheelUrl -OutFile $wheelFile -UseBasicParsing
+
+    Write-Host "Installing InsightFace wheel: $wheelFile"
+    & $pip install --upgrade pip
+    & $pip install $wheelFile
+
+    # Common runtime deps
+    & $pip install --upgrade onnxruntime opencv-python tqdm
+
+    Write-Host "InsightFace installed."
+}
+
+function Write-ExtraModelPathsYaml {
+    param(
+        [string]$comfyDir,
+        [string]$modelsPath
+    )
+
+    Write-Step "Generating extra_model_paths.yaml"
+
+    $yamlPath = Join-Path $comfyDir "extra_model_paths.yaml"
+
+    $sub = @{
+        "checkpoints"    = (Join-Path $modelsPath "checkpoints")
+        "loras"          = (Join-Path $modelsPath "loras")
+        "vae"            = (Join-Path $modelsPath "vae")
+        "controlnet"     = (Join-Path $modelsPath "controlnet")
+        "clip"           = (Join-Path $modelsPath "clip")
+        "clip_vision"    = (Join-Path $modelsPath "clip_vision")
+        "upscale_models" = (Join-Path $modelsPath "upscale_models")
+        "embeddings"     = (Join-Path $modelsPath "embeddings")
+        "unet"           = (Join-Path $modelsPath "unet")
+    }
+
+    $lines = @()
+    $lines += "# Auto-generated by comfyui-oneclick-installer"
+    $lines += "# Base models folder: $modelsPath"
+    $lines += "comfyui:"
+    $lines += "  base_path: `"$modelsPath`""
+
+    foreach ($k in $sub.Keys) {
+        $lines += "  $k: `"$($sub[$k])`""
+    }
+
+    Set-Content -Path $yamlPath -Value $lines -Encoding UTF8
+    Write-Host "Created: $yamlPath"
+}
+
 # -------------------------
 # Paths + logging
 # -------------------------
@@ -128,43 +184,14 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logFile = Join-Path $logDir "install.log"
 Start-Transcript -Path $logFile -Append
 
-Write-Step "ComfyUI One-Click Installer (NVIDIA CUDA)"
+Write-Step "ComfyUI Installer (NVIDIA CUDA)"
 
 # -------------------------
-# CI mode detection
-# -------------------------
-$ciMode = $env:CI_MODE -eq "1"
-if ($ciMode) {
-    Write-Host "CI_MODE detected: YES (GitHub Actions / test environment)"
-} else {
-    Write-Host "CI_MODE detected: NO (real machine mode)"
-}
-
-# -------------------------
-# Ensure prerequisites
+# Prerequisites
 # -------------------------
 Write-Step "Checking prerequisites"
-
-if (-not $ciMode) {
-    # Auto-install requires admin permissions
-    Ensure-Admin
-}
-
-if (!(Test-Command "python")) {
-    Write-Host "Python not found. Installing..."
-    Install-Python
-} else {
-    Write-Host "Python found."
-    python --version
-}
-
-if (!(Test-Command "git")) {
-    Write-Host "Git not found. Installing..."
-    Install-Git
-} else {
-    Write-Host "Git found."
-    git --version
-}
+Ensure-Git
+Ensure-Python
 
 # -------------------------
 # Setup directories
@@ -178,7 +205,6 @@ $nodesListPath = Join-Path $root "installer\nodes.list"
 # Install/update ComfyUI
 # -------------------------
 Write-Step "Installing/Updating ComfyUI"
-
 if (!(Test-Path $comfyDir)) {
     Write-Host "Cloning ComfyUI..."
     git clone https://github.com/comfyanonymous/ComfyUI.git $comfyDir
@@ -192,7 +218,6 @@ if (!(Test-Path $comfyDir)) {
 # Create venv
 # -------------------------
 Write-Step "Creating virtual environment"
-
 Set-Location $comfyDir
 
 if (!(Test-Path $venvDir)) {
@@ -226,10 +251,7 @@ Write-Step "Installing ComfyUI requirements"
 Write-Step "Installing custom nodes"
 New-Item -ItemType Directory -Force -Path $nodesDir | Out-Null
 
-if (!(Test-Path $nodesListPath)) {
-    Write-Host "No nodes.list found at: $nodesListPath"
-    Write-Host "Skipping custom nodes."
-} else {
+if (Test-Path $nodesListPath) {
     $nodeUrls = Get-Content $nodesListPath | Where-Object { $_.Trim() -ne "" -and -not $_.Trim().StartsWith("#") }
 
     foreach ($url in $nodeUrls) {
@@ -251,6 +273,38 @@ if (!(Test-Path $nodesListPath)) {
             & $pip install -r $req
         }
     }
+} else {
+    Write-Host "No nodes.list found. Skipping custom nodes."
+}
+
+# -------------------------
+# Install InsightFace (ONLY)
+# -------------------------
+Write-Step "InsightFace installation"
+$installInsight = Ask-YesNo "Install InsightFace? (Recommended for FaceID nodes / IPAdapter FaceID)" $true
+if ($installInsight) {
+    Install-InsightFaceWheel -py $py -pip $pip -rootDir $root
+} else {
+    Write-Host "Skipping InsightFace."
+}
+
+# -------------------------
+# External models folder
+# -------------------------
+Write-Step "Models folder setup"
+$useExternalModels = Ask-YesNo "Do you want to link an existing Models folder from another drive?" $true
+if ($useExternalModels) {
+    $modelsPath = Read-Host "Enter full path to your existing Models folder (example: D:\AI\Models)"
+    $modelsPath = $modelsPath.Trim('"')
+
+    if (!(Test-Path $modelsPath)) {
+        Write-Host "Folder not found: $modelsPath"
+        Write-Host "Skipping models linking."
+    } else {
+        Write-ExtraModelPathsYaml -comfyDir $comfyDir -modelsPath $modelsPath
+    }
+} else {
+    Write-Host "Skipping models linking."
 }
 
 # -------------------------
@@ -260,26 +314,58 @@ Write-Step "Verification (Torch + CUDA availability)"
 & $py -c "import torch; print('torch version:', torch.__version__); print('cuda available:', torch.cuda.is_available()); print('cuda device count:', torch.cuda.device_count())"
 
 # -------------------------
-# CI MODE: skip launching ComfyUI
+# Create helper BAT files
 # -------------------------
-if ($ciMode) {
-    Write-Step "CI_MODE enabled - skipping ComfyUI launch health check"
-    Write-Step "DONE"
-    Stop-Transcript
-    exit 0
-}
+Write-Step "Creating helper files (run/update)"
+
+$runBat = Join-Path $root "run_comfyui.bat"
+$updateBat = Join-Path $root "update_comfyui.bat"
+
+$runContent = @"
+@echo off
+cd /d "%~dp0"
+cd ComfyUI
+venv\Scripts\python.exe main.py --listen 127.0.0.1 --port 8188
+pause
+"@
+
+$updateContent = @"
+@echo off
+cd /d "%~dp0"
+
+echo Updating ComfyUI...
+cd ComfyUI
+git pull
+
+echo Updating custom nodes...
+cd custom_nodes
+for /d %%D in (*) do (
+  echo Updating %%D ...
+  cd %%D
+  git pull
+  cd ..
+)
+
+echo Done.
+pause
+"@
+
+Set-Content -Path $runBat -Value $runContent -Encoding ASCII
+Set-Content -Path $updateBat -Value $updateContent -Encoding ASCII
+
+Write-Host "Created: run_comfyui.bat"
+Write-Host "Created: update_comfyui.bat"
 
 # -------------------------
-# Launch + health check (real machine mode)
+# Health check
 # -------------------------
 Write-Step "Launching ComfyUI and running health check"
-Set-Location $comfyDir
 
 $serverUrl = "http://127.0.0.1:8188/"
 $logServer = Join-Path $logDir "comfyui-server.log"
 
 Write-Host "Starting ComfyUI..."
-Write-Host "Logging ComfyUI output to: $logServer"
+Write-Host "Logging output to: $logServer"
 
 $comfyProcess = Start-Process `
     -FilePath $py `
@@ -295,15 +381,11 @@ $ok = Wait-ForUrl $serverUrl 300
 
 if (-not $ok) {
     Write-Host ""
-    Write-Host "Health check FAILED. Printing last 80 lines of ComfyUI log:"
+    Write-Host "Health check FAILED. Last 80 lines of comfyui log:"
     Write-Host "--------------------------------------------------------"
-
     if (Test-Path $logServer) {
         Get-Content $logServer -Tail 80 | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host "(No comfyui-server.log created)"
     }
-
     try { Stop-Process -Id $comfyProcess.Id -Force } catch {}
     throw "Health check FAILED: ComfyUI did not respond on port 8188."
 }
