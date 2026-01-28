@@ -1,398 +1,234 @@
-# installer/install.ps1
+````md
 # ComfyUI NVIDIA CUDA Installer (ComfyUI + Custom Nodes)
-#
-# Flow:
-# 1) User manually installs Git and clones THIS repo
-# 2) User runs this PowerShell script
-# 3) Script installs Python (if missing) + ComfyUI + venv + CUDA Torch + nodes
-# 4) Installs InsightFace (prebuilt wheel, no C++ build tools)
-# 5) Optional: links external Models folder using extra_model_paths.yaml
-# 6) Creates run/update BAT files
 
-$ErrorActionPreference = "Stop"
+> **⚠️ NVIDIA ONLY:** This installer is designed for **NVIDIA GPUs with CUDA**.  
+> It installs the **CUDA-enabled PyTorch build (cu121)** and is **not intended for AMD GPUs**.
 
-function Write-Step($msg) {
-    Write-Host ""
-    Write-Host "=== $msg ==="
-}
+This repository provides an automated **PowerShell installer** that sets up ComfyUI with CUDA Torch, curated custom nodes, InsightFace, and optional shared external models folder support.
 
-function Test-Command($cmd) {
-    return [bool](Get-Command $cmd -ErrorAction SilentlyContinue)
-}
+---
 
-function Refresh-Path {
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-}
+## What this installer will do
 
-function Fail($msg) {
-    Write-Host ""
-    Write-Host "ERROR: $msg" -ForegroundColor Red
-    Write-Host ""
-    exit 1
-}
+When you run the installer, it will:
 
-function Ensure-Git {
-    if (!(Test-Command "git")) {
-        Fail "Git not found. Please install Git first from https://git-scm.com/downloads and restart CMD/PowerShell."
-    }
-    git --version | Out-Host
-}
+✅ Clone / update ComfyUI  
+✅ Create a Python virtual environment (`venv`) for ComfyUI  
+✅ Install **PyTorch CUDA build (cu121)**  
+✅ Install ComfyUI requirements  
+✅ Install custom nodes listed in `installer/nodes.list`  
+✅ Install node requirements automatically (if node has `requirements.txt`)  
+✅ Install **InsightFace** (prebuilt wheel, no C++ build tools)  
+✅ Ask for an existing Models folder and configure ComfyUI to use it  
+✅ Create helper files:
+- `run_comfyui.bat` → starts ComfyUI
+- `update_comfyui.bat` → updates ComfyUI + all custom nodes
 
-function Ensure-WinGet {
-    return (Test-Command "winget")
-}
+---
 
-function Ensure-Python {
-    if (Test-Command "python") {
-        python --version | Out-Host
-        return
-    }
+## Requirements (IMPORTANT)
 
-    Write-Step "Python not found - installing Python 3.11"
+### System
+- Windows 10 / Windows 11
+- **NVIDIA GPU required (CUDA)**
 
-    if (!(Ensure-WinGet)) {
-        Fail "winget not found. Install Python manually from https://www.python.org/downloads/windows/ (Python 3.11 recommended)."
-    }
+### Git (Required)
+Git is required because this repo is installed using `git clone`.
 
-    # Install Python 3.11 (recommended)
-    winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements
-    Refresh-Path
+✅ Install Git first:
+https://git-scm.com/downloads
 
-    if (!(Test-Command "python")) {
-        Fail "Python installation finished but python is still not available in PATH. Restart PC and run again."
-    }
+Verify Git works:
 
-    python --version | Out-Host
-}
+```bash
+git --version
+````
 
-function Ask-YesNo($prompt, $defaultYes=$true) {
-    $suffix = $defaultYes ? "[Y/n]" : "[y/N]"
-    $answer = Read-Host "$prompt $suffix"
-    if ([string]::IsNullOrWhiteSpace($answer)) { return $defaultYes }
-    $answer = $answer.Trim().ToLower()
-    return ($answer -eq "y" -or $answer -eq "yes")
-}
+### Python
 
-function Get-RepoNameFromUrl($url) {
-    $u = $url.Trim()
-    if ($u.EndsWith(".git")) { $u = $u.Substring(0, $u.Length - 4) }
-    $parts = $u.Split("/")
-    return $parts[$parts.Length - 1]
-}
+❗ You do **NOT** need to install Python manually.
 
-function Wait-ForUrl($url, $timeoutSeconds = 300) {
-    $start = Get-Date
-    while (((Get-Date) - $start).TotalSeconds -lt $timeoutSeconds) {
-        try {
-            $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
-            if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
-                return $true
-            }
-        } catch {
-            Start-Sleep -Seconds 2
-        }
-    }
-    return $false
-}
+✅ The installer will automatically install **Python 3.11** if Python is missing.
 
-function Install-InsightFaceWheel {
-    param(
-        [string]$py,
-        [string]$pip,
-        [string]$rootDir
-    )
+---
 
-    Write-Step "Installing InsightFace (prebuilt wheel - no C++ build tools)"
+# Installation Instructions
 
-    $pyver = & $py -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
-    $pyver = $pyver.Trim()
-    Write-Host "Detected venv Python: $pyver"
+## Step 1 — Install Git
 
-    $wheelUrl = $null
+Download and install Git first:
+[https://git-scm.com/downloads](https://git-scm.com/downloads)
 
-    # Gourieff maintained wheels commonly used in ComfyUI ecosystem (ReActor/FaceID/etc.)
-    if ($pyver -eq "3.10") {
-        $wheelUrl = "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp310-cp310-win_amd64.whl"
-    } elseif ($pyver -eq "3.11") {
-        $wheelUrl = "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
-    } elseif ($pyver -eq "3.12") {
-        $wheelUrl = "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl"
-    } else {
-        throw "Unsupported Python version for InsightFace wheel: $pyver. Use Python 3.10/3.11/3.12."
-    }
+Then restart CMD/PowerShell and confirm:
 
-    $wheelDir = Join-Path $rootDir "installer\wheels"
-    New-Item -ItemType Directory -Force -Path $wheelDir | Out-Null
-    $wheelFile = Join-Path $wheelDir ([IO.Path]::GetFileName($wheelUrl))
+```bash
+git --version
+```
 
-    Write-Host "Downloading InsightFace wheel..."
-    Invoke-WebRequest -Uri $wheelUrl -OutFile $wheelFile -UseBasicParsing
+---
 
-    Write-Host "Installing InsightFace wheel: $wheelFile"
-    & $pip install --upgrade pip
-    & $pip install $wheelFile
+## Step 2 — Clone this repo
 
-    # Common runtime deps
-    & $pip install --upgrade onnxruntime opencv-python tqdm
+Open **CMD** and run:
 
-    Write-Host "InsightFace installed."
-}
+```bash
+git clone https://github.com/ancilavm/comfyui-oneclick-installer.git
+cd comfyui-oneclick-installer
+```
 
-function Write-ExtraModelPathsYaml {
-    param(
-        [string]$comfyDir,
-        [string]$modelsPath
-    )
+---
 
-    Write-Step "Generating extra_model_paths.yaml"
+## Step 3 — Run the installer (PowerShell)
 
-    $yamlPath = Join-Path $comfyDir "extra_model_paths.yaml"
+From the repo folder, open PowerShell and run:
 
-    $sub = @{
-        "checkpoints"    = (Join-Path $modelsPath "checkpoints")
-        "loras"          = (Join-Path $modelsPath "loras")
-        "vae"            = (Join-Path $modelsPath "vae")
-        "controlnet"     = (Join-Path $modelsPath "controlnet")
-        "clip"           = (Join-Path $modelsPath "clip")
-        "clip_vision"    = (Join-Path $modelsPath "clip_vision")
-        "upscale_models" = (Join-Path $modelsPath "upscale_models")
-        "embeddings"     = (Join-Path $modelsPath "embeddings")
-        "unet"           = (Join-Path $modelsPath "unet")
-    }
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File installer\install.ps1
+```
 
-    $lines = @()
-    $lines += "# Auto-generated by comfyui-oneclick-installer"
-    $lines += "# Base models folder: $modelsPath"
-    $lines += "comfyui:"
-    $lines += "  base_path: `"$modelsPath`""
+---
 
-    foreach ($k in $sub.Keys) {
-        $lines += "  $k: `"$($sub[$k])`""
-    }
+## During installation (interactive prompts)
 
-    Set-Content -Path $yamlPath -Value $lines -Encoding UTF8
-    Write-Host "Created: $yamlPath"
-}
+The installer will ask you:
 
-# -------------------------
-# Paths + logging
-# -------------------------
-$root = Join-Path $PSScriptRoot ".."
-$logDir = Join-Path $root "logs"
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+### 1) Install InsightFace?
 
-$logFile = Join-Path $logDir "install.log"
-Start-Transcript -Path $logFile -Append
+* Recommended: **YES**
+* InsightFace is used by FaceID / InsightFace-based workflows and nodes
+* Installed using prebuilt `.whl` (no compiling / no C++ build tools)
 
-Write-Step "ComfyUI Installer (NVIDIA CUDA)"
+### 2) Link an existing Models folder?
 
-# -------------------------
-# Prerequisites
-# -------------------------
-Write-Step "Checking prerequisites"
-Ensure-Git
-Ensure-Python
+If you already have models stored on another drive (example: `D:\AI\Models`), select YES.
 
-# -------------------------
-# Setup directories
-# -------------------------
-$comfyDir = Join-Path $root "ComfyUI"
-$venvDir  = Join-Path $comfyDir "venv"
-$nodesDir = Join-Path $comfyDir "custom_nodes"
-$nodesListPath = Join-Path $root "installer\nodes.list"
+Installer will generate:
 
-# -------------------------
-# Install/update ComfyUI
-# -------------------------
-Write-Step "Installing/Updating ComfyUI"
-if (!(Test-Path $comfyDir)) {
-    Write-Host "Cloning ComfyUI..."
-    git clone https://github.com/comfyanonymous/ComfyUI.git $comfyDir
-} else {
-    Write-Host "ComfyUI exists, pulling updates..."
-    Set-Location $comfyDir
-    git pull
-}
+```
+ComfyUI\extra_model_paths.yaml
+```
 
-# -------------------------
-# Create venv
-# -------------------------
-Write-Step "Creating virtual environment"
-Set-Location $comfyDir
+So this ComfyUI install can access your existing Models folder.
 
-if (!(Test-Path $venvDir)) {
-    python -m venv venv
-    Write-Host "venv created."
-} else {
-    Write-Host "venv already exists."
-}
+---
 
-$py  = Join-Path $venvDir "Scripts\python.exe"
-$pip = Join-Path $venvDir "Scripts\pip.exe"
+# After Installation
 
-Write-Step "Upgrading pip"
-& $py -m pip install --upgrade pip
+## Start ComfyUI
 
-# -------------------------
-# Install PyTorch CUDA build
-# -------------------------
-Write-Step "Installing PyTorch (CUDA build cu121)"
-& $pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+Double click:
 
-# -------------------------
-# Install ComfyUI requirements
-# -------------------------
-Write-Step "Installing ComfyUI requirements"
-& $pip install -r (Join-Path $comfyDir "requirements.txt")
+✅ `run_comfyui.bat`
 
-# -------------------------
-# Install custom nodes
-# -------------------------
-Write-Step "Installing custom nodes"
-New-Item -ItemType Directory -Force -Path $nodesDir | Out-Null
+or manually:
 
-if (Test-Path $nodesListPath) {
-    $nodeUrls = Get-Content $nodesListPath | Where-Object { $_.Trim() -ne "" -and -not $_.Trim().StartsWith("#") }
-
-    foreach ($url in $nodeUrls) {
-        $name = Get-RepoNameFromUrl $url
-        $target = Join-Path $nodesDir $name
-
-        if (!(Test-Path $target)) {
-            Write-Host "Cloning node: $name"
-            git clone $url $target
-        } else {
-            Write-Host "Updating node: $name"
-            Set-Location $target
-            git pull
-        }
-
-        $req = Join-Path $target "requirements.txt"
-        if (Test-Path $req) {
-            Write-Host "Installing node requirements for $name"
-            & $pip install -r $req
-        }
-    }
-} else {
-    Write-Host "No nodes.list found. Skipping custom nodes."
-}
-
-# -------------------------
-# Install InsightFace (ONLY)
-# -------------------------
-Write-Step "InsightFace installation"
-$installInsight = Ask-YesNo "Install InsightFace? (Recommended for FaceID nodes / IPAdapter FaceID)" $true
-if ($installInsight) {
-    Install-InsightFaceWheel -py $py -pip $pip -rootDir $root
-} else {
-    Write-Host "Skipping InsightFace."
-}
-
-# -------------------------
-# External models folder
-# -------------------------
-Write-Step "Models folder setup"
-$useExternalModels = Ask-YesNo "Do you want to link an existing Models folder from another drive?" $true
-if ($useExternalModels) {
-    $modelsPath = Read-Host "Enter full path to your existing Models folder (example: D:\AI\Models)"
-    $modelsPath = $modelsPath.Trim('"')
-
-    if (!(Test-Path $modelsPath)) {
-        Write-Host "Folder not found: $modelsPath"
-        Write-Host "Skipping models linking."
-    } else {
-        Write-ExtraModelPathsYaml -comfyDir $comfyDir -modelsPath $modelsPath
-    }
-} else {
-    Write-Host "Skipping models linking."
-}
-
-# -------------------------
-# Verification
-# -------------------------
-Write-Step "Verification (Torch + CUDA availability)"
-& $py -c "import torch; print('torch version:', torch.__version__); print('cuda available:', torch.cuda.is_available()); print('cuda device count:', torch.cuda.device_count())"
-
-# -------------------------
-# Create helper BAT files
-# -------------------------
-Write-Step "Creating helper files (run/update)"
-
-$runBat = Join-Path $root "run_comfyui.bat"
-$updateBat = Join-Path $root "update_comfyui.bat"
-
-$runContent = @"
-@echo off
-cd /d "%~dp0"
+```powershell
 cd ComfyUI
-venv\Scripts\python.exe main.py --listen 127.0.0.1 --port 8188
-pause
-"@
+.\venv\Scripts\python.exe main.py --listen 127.0.0.1 --port 8188
+```
 
-$updateContent = @"
-@echo off
-cd /d "%~dp0"
+Open in browser:
 
-echo Updating ComfyUI...
+[http://127.0.0.1:8188](http://127.0.0.1:8188)
+
+---
+
+## Update ComfyUI + Custom Nodes
+
+Double click:
+
+✅ `update_comfyui.bat`
+
+This updates:
+
+* ComfyUI (`git pull`)
+* each custom node in `ComfyUI\custom_nodes\` (`git pull`)
+
+---
+
+## Custom Nodes List
+
+Custom nodes installed are defined here:
+
+```
+installer/nodes.list
+```
+
+Rules:
+
+* One GitHub repo URL per line
+* Empty lines allowed
+* Lines starting with `#` are ignored
+
+---
+
+## Logs
+
+All logs are written to:
+
+```
+logs\
+```
+
+### Installer log
+
+* `logs\install.log`
+
+### ComfyUI server log
+
+* `logs\comfyui-server.log`
+
+---
+
+## Troubleshooting
+
+### Git not found
+
+If you see errors like `git is not recognized`, install Git:
+
+[https://git-scm.com/downloads](https://git-scm.com/downloads)
+
+Restart CMD/PowerShell and run again.
+
+---
+
+### Python installation issues
+
+If Python was installed but still not detected:
+
+* restart the PC
+* reopen PowerShell
+* run the installer again
+
+---
+
+### Health check failed / Port 8188 not responding
+
+Run ComfyUI manually to see the full error output:
+
+```powershell
 cd ComfyUI
-git pull
+.\venv\Scripts\python.exe main.py --listen 127.0.0.1 --port 8188
+```
 
-echo Updating custom nodes...
-cd custom_nodes
-for /d %%D in (*) do (
-  echo Updating %%D ...
-  cd %%D
-  git pull
-  cd ..
-)
+---
 
-echo Done.
-pause
-"@
+### External Models folder gives "Access denied"
 
-Set-Content -Path $runBat -Value $runContent -Encoding ASCII
-Set-Content -Path $updateBat -Value $updateContent -Encoding ASCII
+Choose a folder that your Windows account can access (example: `D:\AI\Models`).
+Avoid protected system folders.
 
-Write-Host "Created: run_comfyui.bat"
-Write-Host "Created: update_comfyui.bat"
+---
 
-# -------------------------
-# Health check
-# -------------------------
-Write-Step "Launching ComfyUI and running health check"
+## Notes
 
-$serverUrl = "http://127.0.0.1:8188/"
-$logServer = Join-Path $logDir "comfyui-server.log"
+* This installer is designed for **NVIDIA CUDA environments only**
+* Models are **NOT downloaded automatically**
+* You must place models inside your Models folder or ComfyUI models folder
 
-Write-Host "Starting ComfyUI..."
-Write-Host "Logging output to: $logServer"
+---
 
-$comfyProcess = Start-Process `
-    -FilePath $py `
-    -ArgumentList "main.py --listen 127.0.0.1 --port 8188" `
-    -WorkingDirectory $comfyDir `
-    -RedirectStandardOutput $logServer `
-    -RedirectStandardError $logServer `
-    -PassThru `
-    -WindowStyle Hidden
+## Disclaimer
 
-Write-Host "Waiting for ComfyUI at $serverUrl ..."
-$ok = Wait-ForUrl $serverUrl 300
-
-if (-not $ok) {
-    Write-Host ""
-    Write-Host "Health check FAILED. Last 80 lines of comfyui log:"
-    Write-Host "--------------------------------------------------------"
-    if (Test-Path $logServer) {
-        Get-Content $logServer -Tail 80 | ForEach-Object { Write-Host $_ }
-    }
-    try { Stop-Process -Id $comfyProcess.Id -Force } catch {}
-    throw "Health check FAILED: ComfyUI did not respond on port 8188."
-}
-
-Write-Host "Health check PASSED: ComfyUI responded."
-Write-Host "Stopping ComfyUI..."
-try { Stop-Process -Id $comfyProcess.Id -Force } catch {}
-
-Write-Step "DONE"
-Stop-Transcript
+This installer downloads and installs Python packages and Git repositories automatically.
+Use at your own risk.
