@@ -5,14 +5,7 @@
 # - Git must be installed (user installs it manually to clone this repo)
 # - Python will be installed automatically if missing
 #
-# What it does:
-# - Installs/updates ComfyUI
-# - Creates venv
-# - Installs CUDA PyTorch cu121
-# - Installs requirements and custom nodes
-# - Installs InsightFace (prebuilt wheel, no C++ build tools)
-# - Optional: Configure external Models folder via extra_model_paths.yaml
-# - Creates run_comfyui.bat and update_comfyui.bat
+# Compatible with: Windows PowerShell 5.1
 
 $ErrorActionPreference = "Stop"
 
@@ -70,7 +63,9 @@ function Ensure-Python {
 }
 
 function Ask-YesNo($prompt, $defaultYes=$true) {
-    $suffix = $defaultYes ? "[Y/n]" : "[y/N]"
+    $suffix = "[Y/n]"
+    if (-not $defaultYes) { $suffix = "[y/N]" }
+
     $answer = Read-Host "$prompt $suffix"
     if ([string]::IsNullOrWhiteSpace($answer)) { return $defaultYes }
     $answer = $answer.Trim().ToLower()
@@ -108,7 +103,7 @@ function Install-InsightFaceWheel {
 
     Write-Step "Installing InsightFace (prebuilt wheel - no C++ build tools)"
 
-    $pyver = & $py -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+    $pyver = & $py -c "import sys; print(str(sys.version_info.major)+'.'+str(sys.version_info.minor))"
     $pyver = $pyver.Trim()
     Write-Host "Detected venv Python: $pyver"
 
@@ -169,7 +164,7 @@ function Write-ExtraModelPathsYaml {
     $lines += "  base_path: `"$modelsPath`""
 
     foreach ($k in $sub.Keys) {
-        $lines += "  $k: `"$($sub[$k])`""
+        $lines += "  ${k}: `"$($sub[$k])`""
     }
 
     Set-Content -Path $yamlPath -Value $lines -Encoding UTF8
