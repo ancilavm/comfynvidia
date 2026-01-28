@@ -1,0 +1,6 @@
+HOW TO INSTALL
+
+1) Open PowerShell in this folder
+2) Run this command:
+
+powershell -NoProfile -ExecutionPolicy Bypass -File installer\install.ps1
