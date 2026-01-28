@@ -1,9 +1,6 @@
 # installer/install.ps1
-# ComfyUI One-Click Installer (CUDA/NVIDIA edition)
-# Installs: ComfyUI + venv + requirements + PyTorch CUDA + custom nodes from nodes.list
-# Health Check:
-# - In CI_MODE (GitHub Actions): skips launching ComfyUI
-# - On real machine: launches ComfyUI -> waits for port 8188 -> pings -> shuts down
+# ComfyUI NVIDIA CUDA Installer (ComfyUI + Custom Nodes)
+# Upgraded: Auto-installs Python + Git if missing (via winget, fallback to choco)
 
 $ErrorActionPreference = "Stop"
 
@@ -14,6 +11,89 @@ function Write-Step($msg) {
 
 function Test-Command($cmd) {
     return [bool](Get-Command $cmd -ErrorAction SilentlyContinue)
+}
+
+function Ensure-Admin {
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    if (-not $isAdmin) {
+        Write-Host ""
+        Write-Host "ERROR: Please run PowerShell as Administrator for automatic installs (Python/Git)." -ForegroundColor Red
+        Write-Host "Right click PowerShell -> Run as Administrator, then run installer again."
+        exit 1
+    }
+}
+
+function Ensure-WinGet {
+    if (Test-Command "winget") { return $true }
+
+    Write-Host "winget not found."
+    return $false
+}
+
+function Ensure-Choco {
+    if (Test-Command "choco") { return $true }
+
+    Write-Host "Chocolatey not found. Installing Chocolatey..."
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+    if (!(Test-Command "choco")) {
+        throw "Chocolatey installation failed."
+    }
+    return $true
+}
+
+function Install-Python {
+    Write-Step "Installing Python"
+
+    if (Ensure-WinGet) {
+        Write-Host "Installing Python via winget..."
+        winget install -e --id Python.Python.3.10 --accept-package-agreements --accept-source-agreements
+    }
+    elseif (Ensure-Choco) {
+        Write-Host "Installing Python via Chocolatey..."
+        choco install python --version=3.10.11 -y
+    }
+    else {
+        throw "No installer found (winget/choco). Cannot install Python automatically."
+    }
+
+    # Refresh PATH
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+    if (!(Test-Command "python")) {
+        throw "Python installation completed, but python is still not available in PATH. Please restart PC and run again."
+    }
+
+    python --version
+}
+
+function Install-Git {
+    Write-Step "Installing Git"
+
+    if (Ensure-WinGet) {
+        Write-Host "Installing Git via winget..."
+        winget install -e --id Git.Git --accept-package-agreements --accept-source-agreements
+    }
+    elseif (Ensure-Choco) {
+        Write-Host "Installing Git via Chocolatey..."
+        choco install git -y
+    }
+    else {
+        throw "No installer found (winget/choco). Cannot install Git automatically."
+    }
+
+    # Refresh PATH
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+    if (!(Test-Command "git")) {
+        throw "Git installation completed, but git is still not available in PATH. Please restart PC and run again."
+    }
+
+    git --version
 }
 
 function Get-RepoNameFromUrl($url) {
@@ -48,32 +128,43 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logFile = Join-Path $logDir "install.log"
 Start-Transcript -Path $logFile -Append
 
-Write-Step "ComfyUI One-Click Installer (CUDA/NVIDIA)"
+Write-Step "ComfyUI One-Click Installer (NVIDIA CUDA)"
 
 # -------------------------
 # CI mode detection
 # -------------------------
 $ciMode = $env:CI_MODE -eq "1"
 if ($ciMode) {
-    Write-Host "CI_MODE detected: YES (GitHub Actions / non-GPU test environment)"
+    Write-Host "CI_MODE detected: YES (GitHub Actions / test environment)"
 } else {
     Write-Host "CI_MODE detected: NO (real machine mode)"
 }
 
 # -------------------------
-# Validate tools
+# Ensure prerequisites
 # -------------------------
 Write-Step "Checking prerequisites"
 
-if (!(Test-Command "git")) {
-    throw "Git is not installed or not in PATH."
-}
-if (!(Test-Command "python")) {
-    throw "Python is not installed or not in PATH."
+if (-not $ciMode) {
+    # Auto-install requires admin permissions
+    Ensure-Admin
 }
 
-python --version
-git --version
+if (!(Test-Command "python")) {
+    Write-Host "Python not found. Installing..."
+    Install-Python
+} else {
+    Write-Host "Python found."
+    python --version
+}
+
+if (!(Test-Command "git")) {
+    Write-Host "Git not found. Installing..."
+    Install-Git
+} else {
+    Write-Host "Git found."
+    git --version
+}
 
 # -------------------------
 # Setup directories
@@ -114,16 +205,13 @@ if (!(Test-Path $venvDir)) {
 $py  = Join-Path $venvDir "Scripts\python.exe"
 $pip = Join-Path $venvDir "Scripts\pip.exe"
 
-# -------------------------
-# Upgrade pip
-# -------------------------
 Write-Step "Upgrading pip"
 & $py -m pip install --upgrade pip
 
 # -------------------------
 # Install PyTorch CUDA build
 # -------------------------
-Write-Step "Installing PyTorch (CUDA build)"
+Write-Step "Installing PyTorch (CUDA build cu121)"
 & $pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 # -------------------------
@@ -157,7 +245,6 @@ if (!(Test-Path $nodesListPath)) {
             git pull
         }
 
-        # If node has requirements.txt, install it
         $req = Join-Path $target "requirements.txt"
         if (Test-Path $req) {
             Write-Host "Installing node requirements for $name"
@@ -167,17 +254,16 @@ if (!(Test-Path $nodesListPath)) {
 }
 
 # -------------------------
-# Verification: Torch import
+# Verification
 # -------------------------
 Write-Step "Verification (Torch + CUDA availability)"
 & $py -c "import torch; print('torch version:', torch.__version__); print('cuda available:', torch.cuda.is_available()); print('cuda device count:', torch.cuda.device_count())"
 
 # -------------------------
-# CI MODE: Skip server launch test
+# CI MODE: skip launching ComfyUI
 # -------------------------
 if ($ciMode) {
     Write-Step "CI_MODE enabled - skipping ComfyUI launch health check"
-    Write-Host "This is expected because GitHub Actions runners do not have NVIDIA GPUs."
     Write-Step "DONE"
     Stop-Transcript
     exit 0
@@ -195,7 +281,6 @@ $logServer = Join-Path $logDir "comfyui-server.log"
 Write-Host "Starting ComfyUI..."
 Write-Host "Logging ComfyUI output to: $logServer"
 
-# Start ComfyUI and redirect output directly to file (reliable)
 $comfyProcess = Start-Process `
     -FilePath $py `
     -ArgumentList "main.py --listen 127.0.0.1 --port 8188" `
@@ -206,7 +291,7 @@ $comfyProcess = Start-Process `
     -WindowStyle Hidden
 
 Write-Host "Waiting for ComfyUI at $serverUrl ..."
-$ok = Wait-ForUrl $serverUrl 300   # 5 minutes timeout (important)
+$ok = Wait-ForUrl $serverUrl 300
 
 if (-not $ok) {
     Write-Host ""
@@ -224,7 +309,6 @@ if (-not $ok) {
 }
 
 Write-Host "Health check PASSED: ComfyUI responded."
-
 Write-Host "Stopping ComfyUI..."
 try { Stop-Process -Id $comfyProcess.Id -Force } catch {}
 
