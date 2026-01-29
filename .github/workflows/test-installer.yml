@@ -12,12 +12,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # ✅ Force Python 3.11 in GitHub Actions environment
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Confirm Python version
         shell: pwsh
@@ -25,10 +23,9 @@ jobs:
           python --version
           python -c "import sys; print(sys.executable)"
 
-      # ✅ Run installer in CI mode
       - name: Run installer (CI mode)
         shell: pwsh
         env:
           CI: "true"
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\setup_comfy.ps1
