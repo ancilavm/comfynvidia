@@ -1,11 +1,6 @@
 # installer/install.ps1
 # ComfyUI NVIDIA CUDA Installer (ComfyUI + Custom Nodes)
-#
-# Requirements:
-# - Git must be installed (user installs it manually to clone this repo)
-# - Python will be installed automatically if missing
-#
-# Compatible with: Windows PowerShell 5.1
+# Compatible with Windows PowerShell 5.1
 
 $ErrorActionPreference = "Stop"
 
@@ -40,26 +35,60 @@ function Ensure-WinGet {
     return (Test-Command "winget")
 }
 
-function Ensure-Python {
-    if (Test-Command "python") {
-        python --version | Out-Host
-        return
+function Get-PythonVersionString {
+    if (!(Test-Command "python")) { return $null }
+    try {
+        $v = python -c "import sys; print(str(sys.version_info.major)+'.'+str(sys.version_info.minor)+'.'+str(sys.version_info.micro))"
+        return $v.Trim()
+    } catch {
+        return $null
     }
+}
 
-    Write-Step "Python not found - installing Python 3.11"
+function Install-Python311 {
+    Write-Step "Installing Python 3.11 (forced)"
 
     if (!(Ensure-WinGet)) {
         Fail "winget not found. Install Python manually from https://www.python.org/downloads/windows/ (Python 3.11 recommended)."
     }
 
+    # Install latest Python 3.11 from winget
     winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements
     Refresh-Path
 
     if (!(Test-Command "python")) {
         Fail "Python installation finished but python is still not available in PATH. Restart PC and run again."
     }
+}
 
-    python --version | Out-Host
+function Ensure-Python311 {
+    $ver = Get-PythonVersionString
+
+    if ($null -eq $ver) {
+        Write-Host "Python not found."
+        Install-Python311
+        $ver = Get-PythonVersionString
+    }
+
+    if ($null -eq $ver) {
+        Fail "Python still not detected after installation."
+    }
+
+    # Ensure 3.11.x
+    if ($ver -notmatch "^3\.11\.") {
+        Write-Host ""
+        Write-Host "Detected Python version: $ver"
+        Write-Host "This installer requires Python 3.11.x for best compatibility and performance."
+        Write-Host "Installing Python 3.11 now..."
+        Install-Python311
+        $ver = Get-PythonVersionString
+    }
+
+    if ($ver -notmatch "^3\.11\.") {
+        Fail "Python 3.11.x could not be enforced. Current python version: $ver"
+    }
+
+    Write-Host "Using Python: $ver"
 }
 
 function Ask-YesNo($prompt, $defaultYes=$true) {
@@ -108,15 +137,10 @@ function Install-InsightFaceWheel {
     Write-Host "Detected venv Python: $pyver"
 
     $wheelUrl = $null
-
-    if ($pyver -eq "3.10") {
-        $wheelUrl = "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp310-cp310-win_amd64.whl"
-    } elseif ($pyver -eq "3.11") {
+    if ($pyver -eq "3.11") {
         $wheelUrl = "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
-    } elseif ($pyver -eq "3.12") {
-        $wheelUrl = "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl"
     } else {
-        throw "Unsupported Python version for InsightFace wheel: $pyver. Use Python 3.10/3.11/3.12."
+        throw "Installer expects venv python 3.11. Detected: $pyver"
     }
 
     $wheelDir = Join-Path $rootDir "installer\wheels"
@@ -188,7 +212,7 @@ Write-Step "ComfyUI Installer (NVIDIA CUDA)"
 # -------------------------
 Write-Step "Checking prerequisites"
 Ensure-Git
-Ensure-Python
+Ensure-Python311
 
 # -------------------------
 # Setup directories
@@ -275,7 +299,7 @@ if (Test-Path $nodesListPath) {
 }
 
 # -------------------------
-# Install InsightFace (ONLY)
+# Install InsightFace
 # -------------------------
 Write-Step "InsightFace installation"
 $installInsight = Ask-YesNo "Install InsightFace? (Recommended for FaceID nodes / IPAdapter FaceID)" $true
