@@ -1,4 +1,4 @@
-name: Test ComfyUI One-Click Installer
+name: Test ComfyNvidia
 
 on:
   push:
